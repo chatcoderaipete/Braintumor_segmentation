@@ -1,0 +1,155 @@
+import albumentations #powerful library for image augmentation tailored for segmentation tasks,
+#offering a wide variety of augmentation techniques suitable for medical imaging.
+import matplotlib.pyplot
+import numpy as np
+import os
+import segmentation_models_pytorch #This library provides pre-implemented segmentation models
+# like U-Net, FPN, and LinkNet, which can be useful if you('re looking to experiment with different architectures '
+# or need a ready-to-use U-Net implementation. It integrates well with PyTorch and can save time in model development.)
+from sklearn.model_selection import KFold
+from sklearn import metrics #For additional evaluation metrics that might not be directly provided by PyTorch,
+# especially if you need more detailed analysis beyond what's available in torchvision.
+import torch
+import torchvision.transforms as transforms
+from torchvision import datasets
+from torch.utils.data import DataLoader, SubsetRandomSampler
+from torch import nn, optim
+from torch.utils.data.Dataset #handle loading of both images and their corresponding segmentation masks.
+from torch.nn.functional #Provides functions like convolutions, which might be used for custom layers or operations not included in torch.nn
+from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models.segmentation # If exploring other segmentation models provided by torchvision, such as FCN or DeepLabV3, for comparison or integration.
+import time #time to process epochs
+from torch.utils.tensorboard import SummaryWriter # visualisation
+
+# Define device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Define data path
+data_path = "C:/Users/pete/Documents/datafile/Consolidated_segmentation"
+
+# Define the path where you want to save the models
+save_model_path = "C:/Users/pete/Documents/datafile/Saved_brainmodel"
+
+# Define the path for the TensorBoard logs
+log_dir = "C:/Users/pete/Documents/datafile/Saved_brain_visualisation"
+
+# Create a TensorBoard SummaryWriter instance with the specified log directory.
+# setting up a logging session that will record various types of information (metrics, images, model graphs, etc.)
+# during your model's training and evaluation processes.
+writer = SummaryWriter(log_dir)
+
+# Ensure the save directory exists
+if not os.path.exists(save_model_path):
+    os.makedirs(save_model_path)
+
+# Define transforms
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+# Load dataset
+full_dataset = datasets.ImageFolder(root=data_path, transform=transform)
+
+# Define num_classes right after loading the dataset
+num_classes = len(full_dataset.classes)
+
+# Define the K-Fold Cross Validator
+k_folds = 5
+kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+
+# TensorBoard SummaryWriter
+log_dir = "C:/Users/pete/Documents/datafile/Saved_brain_visualisation"
+writer = SummaryWriter(log_dir)
+
+# Define the train_model function
+# Original train_model function
+def train_model(model, criterion, optimizer, train_loader, num_epochs, fold):
+    model.train()  # Set the model to training mode
+    for epoch in range(num_epochs):
+        start_time = time.time()  # Start timing the epoch
+
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0 # newline added for tensorboard
+
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()  # Zero the parameter gradients
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            # Backward and optimize
+            loss.backward()
+            optimizer.step()
+
+            # Statistics
+            _, preds = torch.max(outputs, 1)
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+            total_samples += inputs.size(0) # newline added for tensorboard
+
+        epoch_loss = running_loss / total_samples # len(train_loader.dataset) b4 tensorboard
+        epoch_acc = running_corrects.double() /total_samples
+
+        end_time = time.time()  # End timing the epoch
+        epoch_duration = end_time - start_time  # Calculate the duration
+
+# Log to TensorBoard
+        writer.add_scalar(f'Fold_{fold}/Training Loss', epoch_loss, epoch)
+        writer.add_scalar(f'Fold_{fold}/Training Accuracy', epoch_acc, epoch)
+        writer.add_scalar(f'Fold_{fold}/Epoch Duration', epoch_duration, epoch)
+
+        print(f'Fold {fold}, Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}, Duration: {epoch_duration:.2f} sec')
+# Define the evaluate_model function
+def evaluate_model(model, val_loader):
+    model.eval()  # Set the model to evaluation mode
+    running_corrects = 0
+    total = 0
+
+    with torch.no_grad():  # Inference mode, gradients not needed
+        for inputs, labels in val_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+
+            total += labels.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+
+    acc = running_corrects.double() / total
+    print(f'Validation Accuracy: {acc:.4f}')
+
+# Main loop for K-Fold Cross-Validation
+for fold, (train_index, val_index) in enumerate(kf.split(np.arange(len(full_dataset)))):
+    print(f'FOLD {fold + 1}')
+    print('--------------------------------')
+
+    # Reinitialize the model and optimizer for each fold
+    model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1).to(device)
+    for param in model.parameters():
+        param.requires_grad = False  # Freeze parameters
+    model.fc = nn.Linear(model.fc.in_features, num_classes).to(device)  # Send new layer to the device
+
+    optimizer = optim.Adam(model.fc.parameters(), lr=0.001)
+    criterion = nn.CrossEntropyLoss()
+
+    # Subset data loaders for training and validation folds
+    train_subsampler = SubsetRandomSampler(train_index)
+    val_subsampler = SubsetRandomSampler(val_index)
+
+    train_loader = DataLoader(full_dataset, batch_size=32, sampler=train_subsampler)
+    val_loader = DataLoader(full_dataset, batch_size=32, sampler=val_subsampler)
+
+    # Train and evaluate the model on this fold
+    train_model(model, criterion, optimizer, train_loader, num_epochs=750
+                , fold=fold+1)
+    evaluate_model(model, val_loader)
+
+    # Save the model after training
+    model_save_path = os.path.join(save_model_path, f'brain_tumor_model_fold_{fold + 1}.pth')
+    torch.save(model.state_dict(), model_save_path)
+    print(f'Model saved to {model_save_path}')
+
+    print(f'End of fold {fold + 1}\n\n')
